@@ -27,6 +27,8 @@ pub struct ConnectionParams {
     pub session_id: u32,
     pub pd: ProtectionDomain,
     pub max_msg_size: u32,
+    pub initial_remote_seq: u32,
+    pub icc: u32,
 }
 
 pub async fn connect(
@@ -118,7 +120,7 @@ pub async fn connect(
     // Await CONNECT_ACK
     let ack = recv_message(&mut stream).await?;
     match ack {
-        RdowsMessage::ConnectAck(_, payload) => {
+        RdowsMessage::ConnectAck(ack_header, payload) => {
             let max_msg_size = std::cmp::min(payload.max_msg_size, DEFAULT_MAX_MSG_SIZE);
             debug!(session_id, max_msg_size, "received CONNECT_ACK");
             Ok((
@@ -128,6 +130,8 @@ pub async fn connect(
                     session_id,
                     pd: payload.pd,
                     max_msg_size,
+                    initial_remote_seq: ack_header.sequence.wrapping_add(1),
+                    icc: payload.icc,
                 },
             ))
         }

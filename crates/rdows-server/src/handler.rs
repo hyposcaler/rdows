@@ -1,8 +1,8 @@
 use rdows_core::error::{ErrorCode, RdowsError};
 use rdows_core::memory::AccessFlags;
 use rdows_core::message::{
-    AtomicRespPayload, MrDeregAckPayload, MrRegAckPayload, ReadRespPayload, RdowsMessage,
-    ATOMIC_TYPE_CAS, ATOMIC_TYPE_FAA,
+    AtomicRespPayload, CreditUpdatePayload, MrDeregAckPayload, MrRegAckPayload, ReadRespPayload,
+    RdowsMessage, ATOMIC_TYPE_CAS, ATOMIC_TYPE_FAA,
 };
 use rdows_core::opcode::Opcode;
 
@@ -176,7 +176,24 @@ async fn handle_send_data(
     // Data received. Send RECV_COMP back to initiator.
     let _data = payload.data; // In a real implementation, we'd copy to receive buffer
     let header = session.next_header(Opcode::RecvComp, wrid);
-    send_message(sink, &RdowsMessage::RecvComp(header)).await
+    send_message(sink, &RdowsMessage::RecvComp(header)).await?;
+
+    // Credit-based flow control: send CREDIT_UPDATE after ICC/4 SENDs
+    session.sends_since_last_credit += 1;
+    if session.sends_since_last_credit >= session.icc / 4 {
+        let credit_header = session.next_header(Opcode::CreditUpdate, 0);
+        let credit_payload = CreditUpdatePayload {
+            credit_increment: session.sends_since_last_credit,
+        };
+        send_message(
+            sink,
+            &RdowsMessage::CreditUpdate(credit_header, credit_payload),
+        )
+        .await?;
+        session.sends_since_last_credit = 0;
+    }
+
+    Ok(())
 }
 
 // Phase 5: RDMA Write + Read

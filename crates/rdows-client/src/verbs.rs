@@ -1,6 +1,6 @@
 use bytes::Bytes;
 
-use rdows_core::error::RdowsError;
+use rdows_core::error::{ErrorCode, RdowsError};
 use rdows_core::memory::{AccessFlags, LKey, RKey};
 use rdows_core::message::{
     AtomicReqPayload, DataPayload, MrDeregPayload, MrRegPayload, ReadReqPayload, RdowsMessage,
@@ -108,6 +108,12 @@ impl RdowsConnection {
         wrid: u64,
         sg_list: &[ScatterGatherEntry],
     ) -> Result<(), RdowsError> {
+        if self.cq.is_full() {
+            return Err(RdowsError::Protocol(ErrorCode::ErrCqOverflow));
+        }
+        if self.send_credits == 0 {
+            return Err(RdowsError::SendCreditsExhausted);
+        }
         // Gather data from local MRs
         let data = self.gather_sg_data(sg_list)?;
         let total_len = data.len() as u32;
@@ -132,9 +138,10 @@ impl RdowsConnection {
         .await?;
 
         // Await RECV_COMP
-        let resp = connection::recv_message(&mut self.stream).await?;
+        let resp = self.recv_app_message().await?;
         match resp {
             RdowsMessage::RecvComp(_) => {
+                self.send_credits -= 1;
                 self.cq.push(CompletionQueueEntry {
                     wrid: WorkRequestId(wrid),
                     status: 0,
@@ -174,6 +181,9 @@ impl RdowsConnection {
         remote_va: u64,
         sg_list: &[ScatterGatherEntry],
     ) -> Result<(), RdowsError> {
+        if self.cq.is_full() {
+            return Err(RdowsError::Protocol(ErrorCode::ErrCqOverflow));
+        }
         let data = self.gather_sg_data(sg_list)?;
         let total_len = data.len() as u64;
 
@@ -203,7 +213,7 @@ impl RdowsConnection {
         .await?;
 
         // Await WRITE_COMP
-        let resp = connection::recv_message(&mut self.stream).await?;
+        let resp = self.recv_app_message().await?;
         match resp {
             RdowsMessage::WriteComp(_) => {
                 self.cq.push(CompletionQueueEntry {
@@ -247,6 +257,9 @@ impl RdowsConnection {
         local_lkey: LKey,
         local_va: u64,
     ) -> Result<(), RdowsError> {
+        if self.cq.is_full() {
+            return Err(RdowsError::Protocol(ErrorCode::ErrCqOverflow));
+        }
         let header = self.next_header(Opcode::ReadReq, wrid);
         let payload = ReadReqPayload {
             rkey,
@@ -262,7 +275,7 @@ impl RdowsConnection {
         .await?;
 
         // Await READ_RESP
-        let resp = connection::recv_message(&mut self.stream).await?;
+        let resp = self.recv_app_message().await?;
         match resp {
             RdowsMessage::ReadResp(_, resp_payload) => {
                 // Copy data into local MR
@@ -346,6 +359,9 @@ impl RdowsConnection {
         operand1: u64,
         operand2: u64,
     ) -> Result<u64, RdowsError> {
+        if self.cq.is_full() {
+            return Err(RdowsError::Protocol(ErrorCode::ErrCqOverflow));
+        }
         let header = self.next_header(Opcode::AtomicReq, wrid);
         let payload = AtomicReqPayload {
             rkey,
@@ -360,7 +376,7 @@ impl RdowsConnection {
         )
         .await?;
 
-        let resp = connection::recv_message(&mut self.stream).await?;
+        let resp = self.recv_app_message().await?;
         match resp {
             RdowsMessage::AtomicResp(_, resp_payload) => {
                 self.cq.push(CompletionQueueEntry {

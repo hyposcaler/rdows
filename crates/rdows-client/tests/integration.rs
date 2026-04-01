@@ -7,7 +7,8 @@ use tokio_rustls::TlsAcceptor;
 use rdows_client::rdows_core::error::ErrorCode;
 use rdows_client::rdows_core::memory::AccessFlags;
 use rdows_client::rdows_core::queue::ScatterGatherEntry;
-use rdows_client::RdowsConnection;
+use rdows_client::rdows_core::error::RdowsError;
+use rdows_client::{ConnectConfig, RdowsConnection};
 use rdows_server::ServerConfig;
 
 struct TestServer {
@@ -61,6 +62,12 @@ impl TestServer {
 
     async fn connect(&self) -> RdowsConnection {
         RdowsConnection::connect(&self.url(), self.client_tls.clone())
+            .await
+            .unwrap()
+    }
+
+    async fn connect_with_config(&self, config: ConnectConfig) -> RdowsConnection {
+        RdowsConnection::connect_with_config(&self.url(), self.client_tls.clone(), config)
             .await
             .unwrap()
     }
@@ -734,6 +741,158 @@ async fn err_rnr_does_not_close_connection() {
     assert_eq!(cqes[0].status, 0);
     let read_back = conn.read_local_mr(read_mr.lkey, 0, 4).unwrap();
     assert_eq!(&read_back, b"test");
+
+    conn.disconnect().await.unwrap();
+}
+
+// ===========================================================================
+// Phase 9: CQ Overflow, Sequence Validation, Credit Flow Control
+// ===========================================================================
+
+#[tokio::test]
+async fn cq_overflow() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let server = TestServer::start().await;
+    let mut conn = server
+        .connect_with_config(ConnectConfig { cq_capacity: 2 })
+        .await;
+
+    let mr = conn.reg_mr(AccessFlags::LOCAL_WRITE, 256).await.unwrap();
+    conn.write_local_mr(mr.lkey, 0, b"hello").unwrap();
+    let sg = vec![ScatterGatherEntry {
+        lkey: mr.lkey,
+        offset: 0,
+        length: 5,
+    }];
+
+    // Fill CQ to capacity (2 entries) without polling
+    conn.post_send(1, &sg).await.unwrap();
+    conn.post_send(2, &sg).await.unwrap();
+
+    // Third send should fail with CQ overflow
+    let err = conn.post_send(3, &sg).await;
+    assert!(err.is_err());
+    match err.unwrap_err() {
+        RdowsError::Protocol(code) => assert_eq!(code, ErrorCode::ErrCqOverflow),
+        other => panic!("expected ErrCqOverflow, got: {other}"),
+    }
+
+    // Drain CQ and verify recovery
+    let cqes = conn.poll_cq(10);
+    assert_eq!(cqes.len(), 2);
+    conn.post_send(4, &sg).await.unwrap();
+
+    conn.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn sequence_validation_normal() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let server = TestServer::start().await;
+    let mut conn = server.connect().await;
+
+    // Do a series of operations — implicit validation that sequences track correctly
+    let mr = conn
+        .reg_mr(
+            AccessFlags::LOCAL_WRITE
+                | AccessFlags::REMOTE_WRITE
+                | AccessFlags::REMOTE_READ
+                | AccessFlags::REMOTE_ATOMIC,
+            256,
+        )
+        .await
+        .unwrap();
+    let lkey = mr.lkey;
+    let rkey = mr.rkey;
+
+    // SEND
+    conn.write_local_mr(lkey, 0, b"seq test").unwrap();
+    conn.post_send(
+        1,
+        &[ScatterGatherEntry {
+            lkey,
+            offset: 0,
+            length: 8,
+        }],
+    )
+    .await
+    .unwrap();
+    conn.poll_cq(10);
+
+    // RDMA Write
+    conn.write_local_mr(lkey, 0, b"wdata123").unwrap();
+    conn.rdma_write(
+        2,
+        rkey,
+        0,
+        &[ScatterGatherEntry {
+            lkey,
+            offset: 0,
+            length: 8,
+        }],
+    )
+    .await
+    .unwrap();
+    conn.poll_cq(10);
+
+    // RDMA Read
+    let read_mr = conn.reg_mr(AccessFlags::LOCAL_WRITE, 256).await.unwrap();
+    conn.rdma_read(3, rkey, 0, 8, read_mr.lkey, 0)
+        .await
+        .unwrap();
+    conn.poll_cq(10);
+
+    // Atomic CAS
+    conn.write_local_mr(lkey, 0, &0u64.to_be_bytes()).unwrap();
+    conn.rdma_write(
+        4,
+        rkey,
+        0,
+        &[ScatterGatherEntry {
+            lkey,
+            offset: 0,
+            length: 8,
+        }],
+    )
+    .await
+    .unwrap();
+    conn.poll_cq(10);
+    let old = conn.atomic_cas(5, rkey, 0, 0, 42).await.unwrap();
+    assert_eq!(old, 0);
+    conn.poll_cq(10);
+
+    conn.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn send_credits_exhausted() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let server = TestServer::start().await;
+    let mut conn = server.connect().await;
+
+    let mr = conn.reg_mr(AccessFlags::LOCAL_WRITE, 256).await.unwrap();
+    conn.write_local_mr(mr.lkey, 0, b"credit").unwrap();
+    let sg = vec![ScatterGatherEntry {
+        lkey: mr.lkey,
+        offset: 0,
+        length: 6,
+    }];
+
+    // Manually set credits to 2
+    conn.set_send_credits(2);
+
+    conn.post_send(1, &sg).await.unwrap();
+    conn.poll_cq(10);
+    conn.post_send(2, &sg).await.unwrap();
+    conn.poll_cq(10);
+
+    // Third send should fail — credits exhausted
+    let err = conn.post_send(3, &sg).await;
+    assert!(err.is_err());
+    match err.unwrap_err() {
+        RdowsError::SendCreditsExhausted => {}
+        other => panic!("expected SendCreditsExhausted, got: {other}"),
+    }
 
     conn.disconnect().await.unwrap();
 }

@@ -110,6 +110,9 @@ pub enum RdowsError {
     #[error("session closed")]
     SessionClosed,
 
+    #[error("send credits exhausted")]
+    SendCreditsExhausted,
+
     #[error("unexpected message: expected {expected}, got {got:?}")]
     UnexpectedMessage {
         expected: &'static str,

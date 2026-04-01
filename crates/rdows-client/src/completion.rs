@@ -35,4 +35,8 @@ impl CompletionQueue {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    pub fn is_full(&self) -> bool {
+        self.entries.len() >= self.capacity
+    }
 }

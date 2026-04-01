@@ -35,6 +35,9 @@ pub struct Session {
     pub memory_store: crate::memory_store::MemoryStore,
     pub pending_op: handler::PendingOp,
     pub recv_queue_depth: u32,
+    pub expected_remote_seq: Option<u32>,
+    pub sends_since_last_credit: u32,
+    pub icc: u32,
 }
 
 impl Session {
@@ -48,6 +51,9 @@ impl Session {
             memory_store: crate::memory_store::MemoryStore::new(),
             pending_op: handler::PendingOp::None,
             recv_queue_depth,
+            expected_remote_seq: None,
+            sends_since_last_credit: 0,
+            icc: DEFAULT_ICC,
         }
     }
 
@@ -123,7 +129,23 @@ async fn handle_message(
 
     match &session.state {
         SessionState::AwaitingConnect => handle_connect(session, msg, sink).await,
-        SessionState::Ready => handle_ready(session, msg, sink).await,
+        SessionState::Ready => {
+            if let Some(expected) = session.expected_remote_seq {
+                let actual = msg.header().sequence;
+                if actual != expected {
+                    return send_error(
+                        session,
+                        sink,
+                        ErrorCode::ErrSeqGap,
+                        actual,
+                        &format!("expected seq {expected}, got {actual}"),
+                    )
+                    .await;
+                }
+            }
+            session.expected_remote_seq = Some(msg.header().sequence.wrapping_add(1));
+            handle_ready(session, msg, sink).await
+        }
         SessionState::Closed => Ok(()),
     }
 }
@@ -162,6 +184,7 @@ async fn handle_connect(
             let ack = RdowsMessage::ConnectAck(ack_header, ack_payload);
             send_message(sink, &ack).await?;
 
+            session.expected_remote_seq = Some(header.sequence.wrapping_add(1));
             session.state = SessionState::Ready;
             info!(
                 session_id = session.session_id,

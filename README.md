@@ -211,6 +211,37 @@ RDMA Write: OK (CQE: wrid=100, status=0x0000)
 Server receive queue exhausted after 3 SENDs. Connection remains usable for RDMA operations.
 ```
 
+### Server side showing ERR_RNR
+
+```
+hyposcaler@vm-builder:~/src/rdows$ cargo run -p rdows-server -- --bind 0.0.0.0:9443 --cert server.crt --key server.key --recv-queue-depth 3
+   Compiling rdows-server v0.1.0 (/storage/src/rdows/crates/rdows-server)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.68s
+     Running `target/debug/rdows-server --bind '0.0.0.0:9443' --cert server.crt --key server.key --recv-queue-depth 3`
+2026-04-01T21:57:52.831256Z  INFO rdows_server: starting RDoWS server bind=0.0.0.0:9443
+2026-04-01T21:57:52.831281Z  INFO rdows_server: RDoWS server listening addr=0.0.0.0:9443
+2026-04-01T21:58:09.644930Z  INFO rdows_server: WebSocket upgrade complete peer=10.0.0.158:46386
+2026-04-01T21:58:09.645648Z  INFO rdows_server::session: session established session_id=1242882738 max_msg_size=16777216
+2026-04-01T21:58:09.868345Z  INFO rdows_server::session: disconnect received session_id=1242882738
+2026-04-01T21:58:09.868376Z  INFO rdows_server::session: session ended session_id=1242882738
+```
+
+### Client side showing ERR_RNR 
+
+```
+❯  cargo run -p rdows-client -- --url wss://10.1.0.22:9443/rdows --cert server.crt --mode err_rnr
+   Compiling rdows-client v0.1.0 (/home/hyposcaler/RDoWS/crates/rdows-client)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.11s
+     Running `target/debug/rdows-client --url 'wss://10.1.0.22:9443/rdows' --cert server.crt --mode err_rnr`
+Loaded trust anchor from server.crt
+Connecting to wss://10.1.0.22:9443/rdows...
+Session established (id: 0x4A14E2B2)
+SEND #1: OK (CQE: wrid=1, status=0x0000, bytes=15)
+SEND #2: OK (CQE: wrid=2, status=0x0000, bytes=15)
+SEND #3: OK (CQE: wrid=3, status=0x0000, bytes=15)
+SEND #4: ERR_RNR (CQE: wrid=4, status=0x0010)
+```
+
 ## API
 
 The client API mirrors the ibverbs verb model:
