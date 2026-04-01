@@ -34,10 +34,11 @@ pub struct Session {
     pub next_seq: u32,
     pub memory_store: crate::memory_store::MemoryStore,
     pub pending_op: handler::PendingOp,
+    pub recv_queue_depth: u32,
 }
 
 impl Session {
-    fn new() -> Self {
+    fn new(recv_queue_depth: u32) -> Self {
         Self {
             state: SessionState::AwaitingConnect,
             session_id: 0,
@@ -46,6 +47,7 @@ impl Session {
             next_seq: 0,
             memory_store: crate::memory_store::MemoryStore::new(),
             pending_op: handler::PendingOp::None,
+            recv_queue_depth,
         }
     }
 
@@ -56,9 +58,9 @@ impl Session {
     }
 }
 
-pub async fn run_session(ws: WsStream) {
+pub async fn run_session(ws: WsStream, recv_queue_depth: u32) {
     let (mut sink, mut stream) = ws.split();
-    let mut session = Session::new();
+    let mut session = Session::new(recv_queue_depth);
 
     while let Some(msg_result) = stream.next().await {
         let msg = match msg_result {

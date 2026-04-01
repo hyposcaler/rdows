@@ -73,6 +73,9 @@ cargo run -p rdows-client --example one_sided_read
 
 # Atomic FAA counter
 cargo run -p rdows-client --example atomic_counter
+
+# ERR_RNR: receive queue exhaustion and recovery
+cargo run -p rdows-client --example err_rnr_demo
 ```
 
 ## Two-Host Deployment
@@ -91,6 +94,9 @@ openssl req -x509 -newkey rsa:2048 -nodes \
     -addext "basicConstraints=CA:FALSE"
 
 cargo run -p rdows-server -- --bind 0.0.0.0:9443 --cert server.crt --key server.key
+
+# Optional: limit the receive queue depth (default 128)
+cargo run -p rdows-server -- --bind 0.0.0.0:9443 --cert server.crt --key server.key --recv-queue-depth 16
 ```
 
 **Client host** — copy `server.crt` from the server and run the client:
@@ -103,6 +109,12 @@ cargo run -p rdows-client -- --url wss://SERVER_IP:9443/rdows --cert server.crt
 
 # Atomic FAA counter
 cargo run -p rdows-client -- --url wss://SERVER_IP:9443/rdows --cert server.crt --mode atomic
+
+# ERR_RNR: exhaust the server's receive queue (attempts 4 SENDs by default)
+cargo run -p rdows-client -- --url wss://SERVER_IP:9443/rdows --cert server.crt --mode err_rnr
+
+# Control how many SENDs to attempt
+cargo run -p rdows-client -- --url wss://SERVER_IP:9443/rdows --cert server.crt --mode err_rnr --sends 10
 ```
 
 The default `write` mode performs an RDMA Write into the server's memory
@@ -149,6 +161,54 @@ Disconnected.
 2026-04-01T18:11:05.690227Z  INFO rdows_server::session: session established session_id=4215236132 max_msg_size=16777216
 2026-04-01T18:11:05.736776Z  INFO rdows_server::session: disconnect received session_id=4215236132
 2026-04-01T18:11:05.736807Z  INFO rdows_server::session: session ended session_id=4215236132
+```
+
+
+### Client side showing atomics
+```
+ cargo run -p rdows-client -- --url wss://10.1.0.22:9443/rdows --cert server.crt --mode atomic
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.02s
+     Running `target/debug/rdows-client --url 'wss://10.1.0.22:9443/rdows' --cert server.crt --mode atomic`
+Loaded trust anchor from server.crt
+Connecting to wss://10.1.0.22:9443/rdows...
+Session established (id: 0xFD03D7CA)
+Remote MR registered: R_Key=0x5B196DF8, size=64
+Counter initialized to 0
+FAA #1: previous value = 0
+FAA #2: previous value = 1
+FAA #3: previous value = 2
+FAA #4: previous value = 3
+FAA #5: previous value = 4
+Final counter value: 5
+Verification passed.
+Disconnected.
+```
+
+### ERR_RNR: Receive Queue Exhaustion
+
+Per RFC Section 7.1, the server maintains a posted receive queue for SEND
+operations. Each incoming SEND consumes one receive. When the queue is
+exhausted, subsequent SENDs are rejected with ERR_RNR (0x0010). This is a
+recoverable error — the connection remains alive and RDMA Write, Read, and
+Atomic operations continue to work.
+
+The `--recv-queue-depth <N>` server flag controls the initial queue depth
+(default 128). The queue drains without replenishment. The `err_rnr_demo`
+example demonstrates this with a depth of 3:
+
+```
+$ cargo run -p rdows-client --example err_rnr_demo
+Session established (id: 0x312945CA)
+
+SEND #1: OK (CQE: wrid=1, status=0x0000, bytes=15)
+SEND #2: OK (CQE: wrid=2, status=0x0000, bytes=15)
+SEND #3: OK (CQE: wrid=3, status=0x0000, bytes=15)
+SEND #4: ERR_RNR (CQE: wrid=4, status=0x0010)
+
+Connection still alive — performing RDMA Write...
+RDMA Write: OK (CQE: wrid=100, status=0x0000)
+
+Server receive queue exhausted after 3 SENDs. Connection remains usable for RDMA operations.
 ```
 
 ## API

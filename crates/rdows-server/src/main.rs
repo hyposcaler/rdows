@@ -13,6 +13,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bind = get_arg(&args, "--bind").unwrap_or_else(|| "0.0.0.0:9443".to_string());
     let cert_path = get_arg(&args, "--cert").expect("--cert <path> required");
     let key_path = get_arg(&args, "--key").expect("--key <path> required");
+    let recv_queue_depth: u32 = get_arg(&args, "--recv-queue-depth")
+        .map(|s| s.parse().expect("--recv-queue-depth must be a number"))
+        .unwrap_or(128);
 
     let cert_pem = std::fs::read(&cert_path)?;
     let key_pem = std::fs::read(&key_path)?;
@@ -23,7 +26,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(&bind).await?;
     info!(bind = %bind, "starting RDoWS server");
 
-    rdows_server::run_server(listener, acceptor).await;
+    let config = rdows_server::ServerConfig { recv_queue_depth };
+    rdows_server::run_server(listener, acceptor, config).await;
     Ok(())
 }
 

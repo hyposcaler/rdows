@@ -1,5 +1,6 @@
 use std::env;
 
+use rdows_client::rdows_core::error::ErrorCode;
 use rdows_client::rdows_core::memory::AccessFlags;
 use rdows_client::rdows_core::queue::ScatterGatherEntry;
 use rdows_client::RdowsConnection;
@@ -20,11 +21,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut conn = RdowsConnection::connect(&url, tls_config).await?;
     println!("Session established (id: 0x{:08X})", conn.session_id());
 
+    let sends: u64 = get_arg(&args, "--sends")
+        .map(|s| s.parse().expect("--sends must be a number"))
+        .unwrap_or(4);
+
     match mode.as_str() {
         "write" => demo_write(&mut conn).await?,
         "atomic" => demo_atomic(&mut conn).await?,
+        "err_rnr" => demo_err_rnr(&mut conn, sends).await?,
         other => {
-            eprintln!("unknown mode: {other} (valid: write, atomic)");
+            eprintln!("unknown mode: {other} (valid: write, atomic, err_rnr)");
             std::process::exit(1);
         }
     }
@@ -131,6 +137,70 @@ async fn demo_atomic(conn: &mut RdowsConnection) -> Result<(), Box<dyn std::erro
     println!("Final counter value: {final_value}");
     assert_eq!(final_value, 5);
     println!("Verification passed.");
+    Ok(())
+}
+
+async fn demo_err_rnr(conn: &mut RdowsConnection, sends: u64) -> Result<(), Box<dyn std::error::Error>> {
+    let mr = conn.reg_mr(AccessFlags::LOCAL_WRITE, 256).await?;
+    let message = b"Hello from SEND";
+    conn.write_local_mr(mr.lkey, 0, message)?;
+    let sg = vec![ScatterGatherEntry {
+        lkey: mr.lkey,
+        offset: 0,
+        length: message.len() as u32,
+    }];
+
+    let mut succeeded = 0u64;
+    for i in 1..=sends {
+        print!("SEND #{i}: ");
+        match conn.post_send(i, &sg).await {
+            Ok(()) => {
+                let cqes = conn.poll_cq(10);
+                println!(
+                    "OK (CQE: wrid={}, status=0x{:04X}, bytes={})",
+                    cqes[0].wrid.0, cqes[0].status, cqes[0].byte_count
+                );
+                succeeded += 1;
+            }
+            Err(rdows_client::rdows_core::error::RdowsError::Protocol(ErrorCode::ErrRnr)) =>
+            {
+                let cqes = conn.poll_cq(10);
+                println!(
+                    "ERR_RNR (CQE: wrid={}, status=0x{:04X})",
+                    cqes[0].wrid.0, cqes[0].status
+                );
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    // Prove connection is still alive with an RDMA Write
+    println!("\nConnection still alive — performing RDMA Write...");
+    let remote_mr = conn
+        .reg_mr(AccessFlags::REMOTE_WRITE, 64)
+        .await?;
+    conn.write_local_mr(mr.lkey, 0, b"still alive")?;
+    conn.rdma_write(
+        100,
+        remote_mr.rkey,
+        0,
+        &[ScatterGatherEntry {
+            lkey: mr.lkey,
+            offset: 0,
+            length: 11,
+        }],
+    )
+    .await?;
+    let cqes = conn.poll_cq(10);
+    println!(
+        "RDMA Write: OK (CQE: wrid={}, status=0x{:04X})",
+        cqes[0].wrid.0, cqes[0].status
+    );
+
+    println!(
+        "\nServer receive queue exhausted after {succeeded} SENDs. \
+         Connection remains usable for RDMA operations."
+    );
     Ok(())
 }
 

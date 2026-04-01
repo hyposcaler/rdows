@@ -121,15 +121,28 @@ pub enum PendingOp {
         remote_va: u64,
         expected_len: u64,
     },
+    DiscardingSendData,
 }
 
 async fn handle_send(
     session: &mut Session,
     header: rdows_core::frame::RdowsHeader,
     _payload: rdows_core::message::SendPayload,
-    _sink: &mut WsSink,
+    sink: &mut WsSink,
 ) -> Result<(), RdowsError> {
-    // Check if server has posted receives (MVP: auto-accept)
+    if session.recv_queue_depth == 0 {
+        send_error(
+            session,
+            sink,
+            ErrorCode::ErrRnr,
+            header.sequence,
+            "receiver not ready",
+        )
+        .await?;
+        session.pending_op = PendingOp::DiscardingSendData;
+        return Ok(());
+    }
+    session.recv_queue_depth -= 1;
     session.pending_op = PendingOp::AwaitingSendData {
         wrid: header.wrid,
     };
@@ -144,6 +157,10 @@ async fn handle_send_data(
 ) -> Result<(), RdowsError> {
     let wrid = match std::mem::replace(&mut session.pending_op, PendingOp::None) {
         PendingOp::AwaitingSendData { wrid } => wrid,
+        PendingOp::DiscardingSendData => {
+            // SEND was rejected with ERR_RNR; silently discard the data
+            return Ok(());
+        }
         _ => {
             return send_error(
                 session,

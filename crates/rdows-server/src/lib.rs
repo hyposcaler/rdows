@@ -13,7 +13,19 @@ use tracing::{debug, error, info};
 
 use rdows_core::SUBPROTOCOL;
 
-pub async fn run_server(listener: TcpListener, tls_acceptor: TlsAcceptor) {
+pub struct ServerConfig {
+    pub recv_queue_depth: u32,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            recv_queue_depth: 128,
+        }
+    }
+}
+
+pub async fn run_server(listener: TcpListener, tls_acceptor: TlsAcceptor, config: ServerConfig) {
     info!(
         addr = %listener.local_addr().unwrap(),
         "RDoWS server listening"
@@ -29,8 +41,9 @@ pub async fn run_server(listener: TcpListener, tls_acceptor: TlsAcceptor) {
         };
 
         let acceptor = tls_acceptor.clone();
+        let recv_queue_depth = config.recv_queue_depth;
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, acceptor, peer).await {
+            if let Err(e) = handle_connection(stream, acceptor, peer, recv_queue_depth).await {
                 debug!(peer = %peer, "connection error: {e}");
             }
         });
@@ -41,6 +54,7 @@ async fn handle_connection(
     stream: tokio::net::TcpStream,
     acceptor: TlsAcceptor,
     peer: SocketAddr,
+    recv_queue_depth: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     debug!(peer = %peer, "new TCP connection");
 
@@ -50,7 +64,7 @@ async fn handle_connection(
     let ws_stream = tokio_tungstenite::accept_hdr_async(tls_stream, check_subprotocol).await?;
 
     info!(peer = %peer, "WebSocket upgrade complete");
-    session::run_session(ws_stream).await;
+    session::run_session(ws_stream, recv_queue_depth).await;
     Ok(())
 }
 

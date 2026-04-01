@@ -8,6 +8,7 @@ use rdows_client::rdows_core::error::ErrorCode;
 use rdows_client::rdows_core::memory::AccessFlags;
 use rdows_client::rdows_core::queue::ScatterGatherEntry;
 use rdows_client::RdowsConnection;
+use rdows_server::ServerConfig;
 
 struct TestServer {
     addr: SocketAddr,
@@ -16,6 +17,10 @@ struct TestServer {
 
 impl TestServer {
     async fn start() -> Self {
+        Self::start_with_config(ServerConfig::default()).await
+    }
+
+    async fn start_with_config(config: ServerConfig) -> Self {
         let subject_alt_names = vec!["localhost".to_string()];
         let cert = rcgen::generate_simple_self_signed(subject_alt_names).unwrap();
 
@@ -41,7 +46,7 @@ impl TestServer {
         let acceptor = TlsAcceptor::from(Arc::new(server_config));
 
         tokio::spawn(async move {
-            rdows_server::run_server(listener, acceptor).await;
+            rdows_server::run_server(listener, acceptor, config).await;
         });
 
         TestServer {
@@ -548,6 +553,187 @@ async fn atomic_bounds_error() {
         }
         other => panic!("expected ErrBounds, got: {other}"),
     }
+
+    conn.disconnect().await.unwrap();
+}
+
+// ===========================================================================
+// Phase 8: ERR_RNR — Posted Receive Queue
+// ===========================================================================
+
+#[tokio::test]
+async fn send_exhausts_recv_queue() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let server = TestServer::start_with_config(ServerConfig { recv_queue_depth: 3 }).await;
+    let mut conn = server.connect().await;
+
+    let mr = conn.reg_mr(AccessFlags::LOCAL_WRITE, 256).await.unwrap();
+    conn.write_local_mr(mr.lkey, 0, b"hello").unwrap();
+    let sg = vec![ScatterGatherEntry {
+        lkey: mr.lkey,
+        offset: 0,
+        length: 5,
+    }];
+
+    // First 3 sends succeed
+    for i in 1..=3u64 {
+        conn.post_send(i, &sg).await.unwrap();
+        let cqes = conn.poll_cq(10);
+        assert_eq!(cqes.len(), 1);
+        assert_eq!(cqes[0].status, 0);
+    }
+
+    // 4th send gets ERR_RNR
+    let err = conn.post_send(4, &sg).await;
+    assert!(err.is_err());
+    match err.unwrap_err() {
+        rdows_client::rdows_core::error::RdowsError::Protocol(code) => {
+            assert_eq!(code, ErrorCode::ErrRnr);
+        }
+        other => panic!("expected ErrRnr, got: {other}"),
+    }
+    // Drain the ERR_RNR CQE
+    let cqes = conn.poll_cq(10);
+    assert_eq!(cqes.len(), 1);
+    assert_eq!(cqes[0].status, u16::from(ErrorCode::ErrRnr));
+
+    // Connection still alive — RDMA Write works
+    let remote_mr = conn
+        .reg_mr(AccessFlags::REMOTE_WRITE, 64)
+        .await
+        .unwrap();
+    conn.write_local_mr(mr.lkey, 0, b"alive").unwrap();
+    conn.rdma_write(
+        10,
+        remote_mr.rkey,
+        0,
+        &[ScatterGatherEntry {
+            lkey: mr.lkey,
+            offset: 0,
+            length: 5,
+        }],
+    )
+    .await
+    .unwrap();
+    let cqes = conn.poll_cq(10);
+    assert_eq!(cqes.len(), 1);
+    assert_eq!(cqes[0].status, 0);
+
+    conn.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn send_recv_queue_depth_one() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let server = TestServer::start_with_config(ServerConfig { recv_queue_depth: 1 }).await;
+    let mut conn = server.connect().await;
+
+    let mr = conn.reg_mr(AccessFlags::LOCAL_WRITE, 256).await.unwrap();
+    conn.write_local_mr(mr.lkey, 0, b"data").unwrap();
+    let sg = vec![ScatterGatherEntry {
+        lkey: mr.lkey,
+        offset: 0,
+        length: 4,
+    }];
+
+    // First send succeeds
+    conn.post_send(1, &sg).await.unwrap();
+    let cqes = conn.poll_cq(10);
+    assert_eq!(cqes.len(), 1);
+    assert_eq!(cqes[0].status, 0);
+
+    // Second send gets ERR_RNR
+    let err = conn.post_send(2, &sg).await;
+    assert!(err.is_err());
+    match err.unwrap_err() {
+        rdows_client::rdows_core::error::RdowsError::Protocol(code) => {
+            assert_eq!(code, ErrorCode::ErrRnr);
+        }
+        other => panic!("expected ErrRnr, got: {other}"),
+    }
+
+    conn.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn send_recv_queue_depth_zero() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let server = TestServer::start_with_config(ServerConfig { recv_queue_depth: 0 }).await;
+    let mut conn = server.connect().await;
+
+    let mr = conn.reg_mr(AccessFlags::LOCAL_WRITE, 256).await.unwrap();
+    conn.write_local_mr(mr.lkey, 0, b"data").unwrap();
+    let sg = vec![ScatterGatherEntry {
+        lkey: mr.lkey,
+        offset: 0,
+        length: 4,
+    }];
+
+    // Very first send gets ERR_RNR
+    let err = conn.post_send(1, &sg).await;
+    assert!(err.is_err());
+    match err.unwrap_err() {
+        rdows_client::rdows_core::error::RdowsError::Protocol(code) => {
+            assert_eq!(code, ErrorCode::ErrRnr);
+        }
+        other => panic!("expected ErrRnr, got: {other}"),
+    }
+
+    conn.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn err_rnr_does_not_close_connection() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let server = TestServer::start_with_config(ServerConfig { recv_queue_depth: 0 }).await;
+    let mut conn = server.connect().await;
+
+    let mr = conn.reg_mr(AccessFlags::LOCAL_WRITE, 256).await.unwrap();
+    conn.write_local_mr(mr.lkey, 0, b"data").unwrap();
+    let sg = vec![ScatterGatherEntry {
+        lkey: mr.lkey,
+        offset: 0,
+        length: 4,
+    }];
+
+    // Trigger ERR_RNR
+    let err = conn.post_send(1, &sg).await;
+    assert!(err.is_err());
+    // Drain the ERR_RNR CQE
+    conn.poll_cq(10);
+
+    // RDMA Write still works
+    let remote_mr = conn
+        .reg_mr(AccessFlags::REMOTE_WRITE | AccessFlags::REMOTE_READ, 256)
+        .await
+        .unwrap();
+    conn.write_local_mr(mr.lkey, 0, b"test").unwrap();
+    conn.rdma_write(
+        10,
+        remote_mr.rkey,
+        0,
+        &[ScatterGatherEntry {
+            lkey: mr.lkey,
+            offset: 0,
+            length: 4,
+        }],
+    )
+    .await
+    .unwrap();
+    let cqes = conn.poll_cq(10);
+    assert_eq!(cqes.len(), 1);
+    assert_eq!(cqes[0].status, 0);
+
+    // RDMA Read still works
+    let read_mr = conn.reg_mr(AccessFlags::LOCAL_WRITE, 256).await.unwrap();
+    conn.rdma_read(20, remote_mr.rkey, 0, 4, read_mr.lkey, 0)
+        .await
+        .unwrap();
+    let cqes = conn.poll_cq(10);
+    assert_eq!(cqes.len(), 1);
+    assert_eq!(cqes[0].status, 0);
+    let read_back = conn.read_local_mr(read_mr.lkey, 0, 4).unwrap();
+    assert_eq!(&read_back, b"test");
 
     conn.disconnect().await.unwrap();
 }
