@@ -44,7 +44,7 @@ The implementation consists of three crates:
 - **`rdows-client`** — Client library exposing an ibverbs-compatible API:
   `reg_mr`, `dereg_mr`, `post_send`, `rdma_write`, `rdma_read`, `poll_cq`.
 
-## Quick Start
+## Quick Start (Single Host)
 
 Generate self-signed TLS certificates for development:
 
@@ -69,6 +69,75 @@ cargo run -p rdows-client --example one_sided_write
 
 # Random-access RDMA Read
 cargo run -p rdows-client --example one_sided_read
+```
+
+## Two-Host Deployment
+
+RDoWS runs across separate hosts over the network. Both hosts need Rust
+installed (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`).
+
+**Server host** — generate a cert with the server's IP in the SAN and start
+the server:
+
+```sh
+openssl req -x509 -newkey rsa:2048 -nodes \
+    -keyout server.key -out server.crt -days 365 \
+    -subj "/CN=SERVER_IP" \
+    -addext "subjectAltName=IP:SERVER_IP" \
+    -addext "basicConstraints=CA:FALSE"
+
+cargo run -p rdows-server -- --bind 0.0.0.0:9443 --cert server.crt --key server.key
+```
+
+**Client host** — copy `server.crt` from the server and run the client:
+
+```sh
+scp SERVER_IP:~/path/to/server.crt .
+cargo run -p rdows-client -- --url wss://SERVER_IP:9443/rdows --cert server.crt
+```
+
+The client performs an RDMA Write into the server's memory region, reads it
+back, and verifies the round-trip. If `--cert` is omitted, the system trust
+store is used (suitable for CA-signed certificates).
+
+
+## Example 
+
+### Server started
+
+```
+hyposcaler@vm-builder:~/src/rdows$ cargo run -p rdows-server -- --bind 0.0.0.0:9443 --cert server.crt --key server.key
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running `target/debug/rdows-server --bind '0.0.0.0:9443' --cert server.crt --key server.key`
+2026-04-01T18:11:02.346786Z  INFO rdows_server: starting RDoWS server bind=0.0.0.0:9443
+2026-04-01T18:11:02.346809Z  INFO rdows_server: RDoWS server listening addr=0.0.0.0:9443
+```
+
+### Client run
+
+```
+❯  cargo run -p rdows-client -- --url wss://10.1.0.22:9443/rdows --cert server.crt
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.02s
+     Running `target/debug/rdows-client --url 'wss://10.1.0.22:9443/rdows' --cert server.crt`
+Loaded trust anchor from server.crt
+Connecting to wss://10.1.0.22:9443/rdows...
+Session established (id: 0xFB3F6624)
+Remote MR registered: R_Key=0x3D6135CE, size=4096
+RDMA Write: 54 bytes -> remote VA 0x0000
+Write complete: status=0x0000
+RDMA Read: 54 bytes <- remote VA 0x0000
+Read complete: status=0x0000
+Data: "RDMA over WebSockets: because InfiniBand was too easy."
+Verification passed.
+Disconnected.
+```
+
+### Observed on Server side
+```
+2026-04-01T18:11:05.647986Z  INFO rdows_server: WebSocket upgrade complete peer=10.0.0.158:44810
+2026-04-01T18:11:05.690227Z  INFO rdows_server::session: session established session_id=4215236132 max_msg_size=16777216
+2026-04-01T18:11:05.736776Z  INFO rdows_server::session: disconnect received session_id=4215236132
+2026-04-01T18:11:05.736807Z  INFO rdows_server::session: session ended session_id=4215236132
 ```
 
 ## API
