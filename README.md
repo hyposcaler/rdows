@@ -91,8 +91,9 @@ and an operation log.
 RDoWS runs across separate hosts over the network. Both hosts need Rust
 installed (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`).
 
-**Server host** — generate a cert with the server's IP in the SAN and start
-the server:
+### Server Setup
+
+Generate a cert with the server's IP in the SAN and start the server:
 
 ```sh
 openssl req -x509 -newkey rsa:2048 -nodes \
@@ -102,41 +103,52 @@ openssl req -x509 -newkey rsa:2048 -nodes \
     -addext "basicConstraints=CA:FALSE"
 
 cargo run -p rdows-server -- --bind 0.0.0.0:9443 --cert server.crt --key server.key
-
-# Optional: limit the receive queue depth (default 128)
-cargo run -p rdows-server -- --bind 0.0.0.0:9443 --cert server.crt --key server.key --recv-queue-depth 16
 ```
 
-**Client host** — copy `server.crt` from the server and run the client:
+For the ERR_RNR demo, limit the receive queue depth so it exhausts quickly:
+
+```sh
+cargo run -p rdows-server -- --bind 0.0.0.0:9443 --cert server.crt --key server.key --recv-queue-depth 3
+```
+
+### Client Setup
+
+Copy `server.crt` from the server host:
 
 ```sh
 scp SERVER_IP:~/path/to/server.crt .
+```
 
-# RDMA Write + Read (default)
+### Client Demos
+
+All demos use `--url` and `--cert` to connect to the remote server. If
+`--cert` is omitted, the system trust store is used (for CA-signed certs).
+
+```sh
+# RDMA Write + Read (default) — writes data into remote memory, reads it back
 cargo run -p rdows-client -- --url wss://SERVER_IP:9443/rdows --cert server.crt
 
-# Atomic FAA counter
+# Random-access RDMA Read — populates remote MR, reads records in reverse order
+cargo run -p rdows-client -- --url wss://SERVER_IP:9443/rdows --cert server.crt --mode read
+
+# Two-sided SEND/RECV — posts a SEND message to the server
+cargo run -p rdows-client -- --url wss://SERVER_IP:9443/rdows --cert server.crt --mode echo
+
+# Atomic FAA counter — increments a remote counter 5 times via Fetch-and-Add
 cargo run -p rdows-client -- --url wss://SERVER_IP:9443/rdows --cert server.crt --mode atomic
 
-# ERR_RNR: exhaust the server's receive queue (attempts 4 SENDs by default)
+# ERR_RNR — exhaust the server's receive queue (use --recv-queue-depth on server)
 cargo run -p rdows-client -- --url wss://SERVER_IP:9443/rdows --cert server.crt --mode err_rnr
 
 # Control how many SENDs to attempt
 cargo run -p rdows-client -- --url wss://SERVER_IP:9443/rdows --cert server.crt --mode err_rnr --sends 10
 ```
 
-The default `write` mode performs an RDMA Write into the server's memory
-region, reads it back, and verifies the round-trip. The `atomic` mode
-initializes a remote counter to 0, increments it five times with
-Fetch-and-Add, and verifies the final value. If `--cert` is omitted, the
-system trust store is used (suitable for CA-signed certificates).
-
 ### KV Store (Remote)
 
 Run the KV store web UI against a remote RDoWS server:
 
 ```sh
-# On the client host (server.crt copied from server host):
 cargo run -p rdows-kv -- --remote wss://SERVER_IP:9443/rdows --cert server.crt
 
 # Or skip TLS verification for quick testing:

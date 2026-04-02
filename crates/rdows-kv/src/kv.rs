@@ -154,7 +154,7 @@ fn slot_hex_lines(data: &[u8; SLOT_SIZE]) -> Vec<String> {
 
     // Key region: show only the occupied portion + 1 line of padding
     let key_len = u16::from_be_bytes([data[OFF_KEY_LEN], data[OFF_KEY_LEN + 1]]) as usize;
-    let key_show = (key_len + 15) / 16 + 1; // round up to full lines + 1
+    let key_show = key_len.div_ceil(16) + 1;
     lines.push(format!("--- key data ({key_len} bytes) ---"));
     lines.extend(hex_dump_region(
         &data[OFF_KEY..OFF_KEY + key_show.min(16) * 16],
@@ -164,7 +164,7 @@ fn slot_hex_lines(data: &[u8; SLOT_SIZE]) -> Vec<String> {
 
     // Value region: show only the occupied portion + 1 line of padding
     let val_len = u16::from_be_bytes([data[OFF_VAL_LEN], data[OFF_VAL_LEN + 1]]) as usize;
-    let val_show = (val_len + 15) / 16 + 1;
+    let val_show = val_len.div_ceil(16) + 1;
     let val_end = (OFF_VALUE + val_show * 16).min(SLOT_SIZE);
     lines.push(format!("--- value data ({val_len} bytes) ---"));
     lines.extend(hex_dump_region(

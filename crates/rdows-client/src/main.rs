@@ -28,10 +28,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match mode.as_str() {
         "write" => demo_write(&mut conn).await?,
+        "read" => demo_read(&mut conn).await?,
+        "echo" => demo_echo(&mut conn).await?,
         "atomic" => demo_atomic(&mut conn).await?,
         "err_rnr" => demo_err_rnr(&mut conn, sends).await?,
         other => {
-            eprintln!("unknown mode: {other} (valid: write, atomic, err_rnr)");
+            eprintln!("unknown mode: {other} (valid: write, read, echo, atomic, err_rnr)");
             std::process::exit(1);
         }
     }
@@ -89,6 +91,104 @@ async fn demo_write(conn: &mut RdowsConnection) -> Result<(), Box<dyn std::error
     println!("Data: {:?}", std::str::from_utf8(&read_back)?);
     assert_eq!(&read_back, payload);
     println!("Verification passed.");
+    Ok(())
+}
+
+async fn demo_read(conn: &mut RdowsConnection) -> Result<(), Box<dyn std::error::Error>> {
+    let remote_mr = conn
+        .reg_mr(AccessFlags::REMOTE_WRITE | AccessFlags::REMOTE_READ, 256)
+        .await?;
+    println!(
+        "Remote MR registered: R_Key=0x{:08X}, size=256",
+        remote_mr.rkey.0
+    );
+
+    let write_mr = conn.reg_mr(AccessFlags::LOCAL_WRITE, 256).await?;
+
+    // Populate the remote MR with structured data
+    let records = [
+        "record_0: alpha",
+        "record_1: bravo",
+        "record_2: charlie",
+        "record_3: delta",
+    ];
+
+    for (i, record) in records.iter().enumerate() {
+        let offset = i * 64;
+        conn.write_local_mr(write_mr.lkey, 0, record.as_bytes())?;
+        conn.rdma_write(
+            i as u64,
+            remote_mr.rkey,
+            offset as u64,
+            &[ScatterGatherEntry {
+                lkey: write_mr.lkey,
+                offset: 0,
+                length: record.len() as u32,
+            }],
+        )
+        .await?;
+    }
+    conn.poll_cq(10);
+    println!("Populated remote MR with {} records", records.len());
+
+    // Read back records in reverse order to demonstrate random access
+    let read_mr = conn.reg_mr(AccessFlags::LOCAL_WRITE, 256).await?;
+
+    for i in (0..records.len()).rev() {
+        let offset = i * 64;
+        let len = records[i].len();
+
+        conn.rdma_read(
+            100 + i as u64,
+            remote_mr.rkey,
+            offset as u64,
+            len as u64,
+            read_mr.lkey,
+            0,
+        )
+        .await?;
+
+        let data = conn.read_local_mr(read_mr.lkey, 0, len)?;
+        println!(
+            "  Read VA 0x{:04X}: {:?}",
+            offset,
+            std::str::from_utf8(&data)?
+        );
+    }
+    conn.poll_cq(10);
+    println!("Random-access read verification passed.");
+    Ok(())
+}
+
+async fn demo_echo(conn: &mut RdowsConnection) -> Result<(), Box<dyn std::error::Error>> {
+    let mr = conn.reg_mr(AccessFlags::LOCAL_WRITE, 256).await?;
+    println!(
+        "Registered MR: L_Key=0x{:08X}, R_Key=0x{:08X}, size=256",
+        mr.lkey.0, mr.rkey.0
+    );
+
+    let message = b"Hello, RDoWS! The CPU never saw this coming.";
+    conn.write_local_mr(mr.lkey, 0, message)?;
+
+    println!("Posting SEND ({} bytes)...", message.len());
+    conn.post_send(
+        1,
+        &[ScatterGatherEntry {
+            lkey: mr.lkey,
+            offset: 0,
+            length: message.len() as u32,
+        }],
+    )
+    .await?;
+
+    let cqes = conn.poll_cq(10);
+    for cqe in &cqes {
+        println!(
+            "CQE: wrid={}, status=0x{:04X}, bytes={}",
+            cqe.wrid.0, cqe.status, cqe.byte_count
+        );
+    }
+    println!("SEND complete.");
     Ok(())
 }
 
